@@ -5,14 +5,15 @@ import random
 from datetime import datetime
 from torch import nn
 from torch.utils.data import DataLoader
-from configs import TrainingConfig
+from src.configs import TrainingConfig
 from tqdm import tqdm
 from torch.nn import functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.optim.lr_scheduler import LRScheduler
-
-from optimizers import PMA, AGMA
+import loralib as lora
+from src.optimizers import PMA
+import pynvml
 
 
 class Trainer:
@@ -40,12 +41,16 @@ class Trainer:
         if not os.path.exists(f'./runs/{self.run_name}'):
             os.makedirs(f'./runs/{self.run_name}')
         file_name = f'{self.run_name}_final.pt' if is_last else f'{self.run_name}_step{step}.pt'
+        if self.cfg.lora_rank >0:
+            state_dict = lora.lora_state_dict(self.model, bias=self.cfg.lora_bias)
+        else:
+            state_dict = self.model.state_dict()
         torch.save(
             {
                 'step': step,
                 'model_state_dict':
-                    self.model.state_dict(),  # Save the unoptimized model
-                'optimizer_state_dict': self.optimizer.state_dict(),
+                    state_dict,  # Save the unoptimized model
+                'optimizer_state_dict': state_dict,
             },
             f'./runs/{self.run_name}/{file_name}')
     
@@ -97,6 +102,7 @@ class SFTTrainer(Trainer):
         plt.xlabel('steps')
         plt.ylabel('train_loss')
         plt.savefig(f'./runs/{self.run_name}/train_loss.png')
+        plt.show()
         plt.close()
 
         plt.figure()
@@ -104,6 +110,7 @@ class SFTTrainer(Trainer):
         plt.xlabel('steps')
         plt.ylabel('eval_loss')
         plt.savefig(f'./runs/{self.run_name}/eval_loss.png')
+        plt.show()
         plt.close()
 
     @torch.no_grad()
@@ -125,8 +132,26 @@ class SFTTrainer(Trainer):
             loss_list.append(loss.item())
         self.model.train()
         return np.mean(np.array(loss_list))
+    
+    def print_trainable_parameters(self):
+        """
+        Prints the number of trainable parameters in the model.
+        """
+        trainable_params = 0
+        all_param = 0
+        for _, param in self.model.named_parameters():
+            all_param += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+        print(f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}")
 
     def fit(self):
+        if self.cfg.lora_rank > 0:
+            lora.mark_only_lora_as_trainable(self.model, bias=self.cfg.lora_bias)
+            print("Fintuning with LoRA, rank:{}, bias:{}".format(self.cfg.lora_rank, self.cfg.lora_bias))
+        self.print_trainable_parameters()
+        pynvml.nvmlInit()
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
 
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1000, gamma=0.9)
@@ -139,8 +164,14 @@ class SFTTrainer(Trainer):
         steps_count = 0
         cummulated_steps = 0
             
-        for epoch in tqdm(range(self.cfg.total_epochs)):
-            for x,y in tqdm(self.train_dataloader):
+        for epoch in range(self.cfg.total_epochs):
+            print("epoch:", epoch)
+            for x,y in tqdm(self.train_dataloader, position=0):
+                if steps_count == 5:
+                    meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    print('\n',meminfo.total/1024**3) #总的显存大小
+                    print(meminfo.used/1024**3)  #已用显存大小
+                    print(meminfo.free/1024**3)
                 steps_count += 1
                 if steps_count > self.cfg.max_steps:
                     steps_count = 0
@@ -155,12 +186,6 @@ class SFTTrainer(Trainer):
 
                 epoch_loss_list.append(loss.item())
                 loss.backward()
-
-                # self.optimizer.step()
-                # self.optimizer.zero_grad()
-                # self.loss_list.append(loss.item())
-                # self.plot_figure()
-                    
 
                 cummulated_iterations += 1
                 if cummulated_iterations >= self.cfg.max_cumulate_iter:
@@ -179,7 +204,12 @@ class SFTTrainer(Trainer):
                     self.eval_loss_list.append(current_eval_loss)
                     self.plot_figure()
                     self.save_metrics({'train_loss':self.loss_list, 'eval_loss':self.eval_loss_list})
-
+                    print("step:", steps_count, "eval_loss:", current_eval_loss, "train_loss:", self.loss_list[-1])
+                if steps_count == 6:
+                    meminfo = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    print('\n',meminfo.total/1024**3) #总的显存大小
+                    print(meminfo.used/1024**3)  #已用显存大小
+                    print(meminfo.free/1024**3)
 
 class WarmUpScheduler(LRScheduler):
     def __init__(self, optimizer, warmup_steps, last_epoch=-1):
@@ -244,16 +274,11 @@ class DPOTrainer(Trainer):
         self.eval_acc_list = []
 
         # self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.dpo_lr)
-        if self.cfg.optimizer == 'AGMA':
-            self.optimizer = AGMA(self.model.parameters(), lr=self.cfg.dpo_lr, accumulate_steps=self.cfg.eval_interval)
-        elif self.cfg.optimizer == 'SGD':
-            self.optimizer = torch.optim.SGD(self.model.parameters(), lr=self.cfg.dpo_lr, momentum=0.9, weight_decay=0.01)
-        else:
-            self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.dpo_lr)
+        self.optimizer = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.dpo_lr)
         if self.cfg.scheduler:
             # self.scheduler = WarmUpScheduler(self.optimizer, warmup_steps=10)
-            self.scheduler = WarmUpScheduler(self.optimizer, warmup_steps=150)
-            # self.scheduler = PMA(self.optimizer, cumulate_steps=self.cfg.eval_interval)
+            # self.scheduler = WarmUpScheduler(self.optimizer, warmup_steps=150)
+            self.scheduler = PMA(self.optimizer, cumulate_steps=self.cfg.eval_interval)
         else:
             self.scheduler = None
         
@@ -433,10 +458,6 @@ class DPOTrainer(Trainer):
         plt.close()
 
     def fit(self):
-        # self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.actor_lr, betas=(self.cfg.adam_beta1, self.cfg.adam_beta2))
-        # self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.dpo_lr, betas=(self.cfg.adam_beta1, self.cfg.adam_beta2))
-        # self.scheduler = WarmUpScheduler(self.optimizer, warmup_steps=150)
-        # criterion = torch.nn.CrossEntropyLoss()
 
         self.model.to(self.device)
         self.ref_model.to(self.device)
@@ -451,9 +472,6 @@ class DPOTrainer(Trainer):
         for epoch in tqdm(range(self.cfg.total_epochs)):
             for x,attn_mask in tqdm(self.train_dataloader):
                 steps_count += 1
-                # if steps_count > self.cfg.max_steps:
-                #     steps_count = 0
-                #     break
                 B,_, T = x.size()
                 x, attn_mask = x.reshape(-1, T), attn_mask.reshape(-1, T)
                 x, attn_mask = x.to(self.device), attn_mask.to(self.device)
@@ -481,7 +499,6 @@ class DPOTrainer(Trainer):
 
                     if self.cfg.gradient_clipping:
                         nn.utils.clip_grad_value_(self.model.parameters(), clip_value=self.cfg.grad_value_clip*self.cfg.max_cumulate_iter)
-                    # nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=2.0*self.cfg.max_cumulate_iter, norm_type=2)
             
                     self.optimizer.step()
                     if self.scheduler is not None:
@@ -495,7 +512,6 @@ class DPOTrainer(Trainer):
                         # flag=True
                         eval_interval = 0
                         current_eval_loss, current_eval_acc = self.evaluate()
-                        # current_eval_loss, current_eval_acc = 0,0
                         
                         if len(self.eval_loss_list)>0 and current_eval_acc > max(self.eval_acc_list):
                             self.save_states(cummulated_steps, is_last=True)
@@ -510,19 +526,3 @@ class DPOTrainer(Trainer):
                         self.save_metrics({'train_loss':self.loss_list, 'eval_loss':self.eval_loss_list, 'eval_acc':self.eval_acc_list})
                         self.model.train()
                     
-                    # if self.cfg.max_cumulate_iter < 512 and steps_count % 100 == 0:
-                    #     self.eval_loss_list.append(current_eval_loss)
-                    #     self.eval_acc_list.append(current_eval_acc)
-                    #     self.plot_figure()
-                    #     self.save_metrics({'train_loss':self.loss_list, 'eval_loss':self.eval_loss_list, 'eval_acc':self.eval_acc_list})
-                    #     self.model.train()
-                    # elif self.cfg.max_cumulate_iter >= 512:
-                    #     self.eval_loss_list.append(current_eval_loss)
-                    #     self.eval_acc_list.append(current_eval_acc)
-                    #     self.plot_figure()
-                    #     self.save_metrics({'train_loss':self.loss_list, 'eval_loss':self.eval_loss_list, 'eval_acc':self.eval_acc_list})
-                    #     self.model.train()
-                    # self.eval_loss_list.append(current_eval_loss)
-                    # self.eval_acc_list.append(current_eval_acc)
-                    # self.plot_figure()
-                    # self.save_metrics({'train_loss':self.loss_list, 'eval_loss':self.eval_loss_list, 'eval_acc':self.eval_acc_list})

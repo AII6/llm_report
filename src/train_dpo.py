@@ -3,9 +3,9 @@ import torch
 import copy
 import os
 from trainers import DPOTrainer
-from configs import get_configs
-from gpt import GPTActor, GPTRewardModel, GPTCritic, GPT
-from dataset import DahoasSFTStaticPromptsDataset, RLHFDataset
+from src.configs import get_configs
+from src.gpt import GPTActor, GPTRewardModel, GPTCritic, GPT
+from src.dataset import DahoasSFTStaticPromptsDataset, RLHFDataset
 
 
 def train(pretrain, batch_size, exp_name, max_cumulate_iter, eval_interval, conservative_loss, contrastive_loss, clamp, gradient_clipping, optimizer, device="cuda:0"):
