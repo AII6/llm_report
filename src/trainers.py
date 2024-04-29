@@ -3,6 +3,8 @@ import os
 import json
 import random
 from datetime import datetime
+
+import wandb
 from torch import nn
 from torch.utils.data import DataLoader
 from src.configs import TrainingConfig
@@ -11,7 +13,7 @@ from torch.nn import functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 from torch.optim.lr_scheduler import LRScheduler
-
+from dataset import DataCollatorForSupervisedDataset
 from src.optimizers import PMA, AGMA
 
 
@@ -52,7 +54,7 @@ class Trainer:
 class SFTTrainer(Trainer):
 
     def __init__(self, cfg: TrainingConfig, device, model: nn.Module,
-                 train_dataset, test_dataset) -> None:
+                 train_dataset, test_dataset, tokenizer) -> None:
         super().__init__()
         self.cfg = cfg
         self.device = device
@@ -64,12 +66,14 @@ class SFTTrainer(Trainer):
             DataLoader(train_dataset,
                        batch_size=cfg.batch_size,
                        num_workers=min(6,cfg.batch_size),
+                       collate_fn=DataCollatorForSupervisedDataset(tokenizer=tokenizer),
                     #    shuffle=True,
                        pin_memory=True))
         self.test_dataloader = iter(
             DataLoader(test_dataset,
                        batch_size=cfg.batch_size,
                        num_workers=min(6,cfg.batch_size),
+                       collate_fn=DataCollatorForSupervisedDataset(tokenizer=tokenizer),
                        pin_memory=True))
         self.model = model
         self.dtype = torch.float16
@@ -127,7 +131,7 @@ class SFTTrainer(Trainer):
         return np.mean(np.array(loss_list))
 
     def fit(self):
-
+        print(f"Starting`training")
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1000, gamma=0.9)
         criterion = torch.nn.CrossEntropyLoss()
@@ -138,14 +142,52 @@ class SFTTrainer(Trainer):
         self.optimizer.zero_grad()
         steps_count = 0
         cummulated_steps = 0
-            
-        for epoch in tqdm(range(self.cfg.total_epochs)):
-            for x,y in tqdm(self.train_dataloader):
+
+        grad_num = len(self.train_dataloader)//10
+        for epoch in tqdm(range(1)):
+            for xx in tqdm(self.train_dataloader):
                 steps_count += 1
                 if steps_count > self.cfg.max_steps:
                     steps_count = 0
                     break
-                x, y = x.to(self.device), y.to(self.device)
+                x, y = xx["input_ids"].to(self.device), xx["labels"].to(self.device)
+
+                grads = []
+                if steps_count % grad_num == 0:
+                    for i in range(x.size(0)):
+                        # 每次迭代前清零梯度
+                        self.model.zero_grad()
+
+                        # 取出一个样本
+                        x_sample = x[i].unsqueeze(0)
+                        y_true_sample = y[i].unsqueeze(0)
+
+                        # 前向传播
+                        logits_ = self.model(x_sample)
+                        B, T, C = logits_.shape
+                        logits_ = logits_.view(B * T, C)
+                        y_true_sample = y_true_sample.view(B*T)
+
+                        # 计算损失
+                        loss = criterion(logits_, y_true_sample)
+
+                        # 反向传播
+                        loss.backward()
+
+                        # 收集梯度
+                        grads.append(self.model.lm_head.weight.grad.clone())
+
+                    # 计算梯度方差
+                    # variances = {name: torch.stack([g[name] for g in grads]).var(0) for name in grads[0]}
+                    # mean_variances = {name: v.mean().item() for name, v in variances.items()}
+
+                    grads_tensor = torch.stack(grads)
+                    variances = grads_tensor.var(dim=0)
+                    variances = variances.mean()
+
+                    wandb.log({"variance": variances})
+
+                self.model.zero_grad()
 
                 logits = self.model(x)
                 B, T, C = logits.shape
