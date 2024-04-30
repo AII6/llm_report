@@ -17,6 +17,7 @@ from dataset import DataCollatorForSupervisedDataset
 from src.optimizers import PMA, AGMA
 
 
+
 class Trainer:
 
     def __init__(self) -> None:
@@ -131,6 +132,13 @@ class SFTTrainer(Trainer):
         return np.mean(np.array(loss_list))
 
     def fit(self):
+        run = wandb.init(
+            project="nlp_class",
+            name="GPT2_grad_variance_opt_" + str(self.cfg.optimizer) + "_lr_" + str(self.cfg.lr) + "_dropout_",
+            # config=dict(self.cfg),
+            # id="o8kodgq8",
+            # resume='must'
+        )
         print(f"Starting`training")
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
         self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=1000, gamma=0.9)
@@ -170,6 +178,7 @@ class SFTTrainer(Trainer):
 
                         # 计算损失
                         loss = criterion(logits_, y_true_sample)
+                        wandb.log({"train_loss": loss.item()})
 
                         # 反向传播
                         loss.backward()
@@ -214,6 +223,7 @@ class SFTTrainer(Trainer):
                     epoch_loss_list = []
 
                     current_eval_loss = self.evaluate()
+                    wandb.log({"current_eval_loss": current_eval_loss})
 
                     if len(self.eval_loss_list)>0 and current_eval_loss < min(self.eval_loss_list):
                         self.save_states(cummulated_steps, is_last=True)
