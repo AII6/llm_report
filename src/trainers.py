@@ -153,7 +153,7 @@ class SFTTrainer(Trainer):
         steps_count = 0
         cummulated_steps = 0
 
-        grad_num = len(self.train_dataloader)//10
+        grad_num = 8
         for epoch in tqdm(range(1)):
             for xx in tqdm(self.train_dataloader):
                 steps_count += 1
