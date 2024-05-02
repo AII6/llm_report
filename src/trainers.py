@@ -117,7 +117,8 @@ class SFTTrainer(Trainer):
 
         loss_list = []
         eval_step_count=0
-        for x, y in self.test_dataloader:
+        for xx in self.test_dataloader:
+            x, y = xx["input_ids"].to(self.device), xx["labels"].to(self.device)
             eval_step_count += 1
             if eval_step_count > self.cfg.eval_set_size:
                 break
@@ -132,6 +133,7 @@ class SFTTrainer(Trainer):
         return np.mean(np.array(loss_list))
 
     def fit(self):
+        wandb.login(key="ab4c28fc5981bd726c5a17d088b5acd99d468841")
         run = wandb.init(
             project="nlp_class",
             name="GPT2_grad_variance_opt_" + str(self.cfg.optimizer) + "_lr_" + str(self.cfg.lr) + "_dropout_",
