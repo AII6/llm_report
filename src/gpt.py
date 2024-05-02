@@ -294,7 +294,8 @@ class GPT(nn.Module):
         #         fp.write(k + '\n')
 
         from transformers import GPT2LMHeadModel
-        model_pretrained = GPT2LMHeadModel.from_pretrained(cfg.hf_model)
+        # model_pretrained = GPT2LMHeadModel.from_pretrained(cfg.hf_model)
+        model_pretrained = GPT2LMHeadModel.from_pretrained("../checkpoints/gpt2")
         # model_pretrained = GPT2LMHeadModel.from_pretrained('gpt2')
         pretrained_states = model_pretrained.state_dict()
 

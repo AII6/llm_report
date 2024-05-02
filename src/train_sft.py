@@ -42,7 +42,7 @@ def train(pretrain, batch_size, exp_name):
     #                               split='test',
     #                               max_examples=None,
     #                               tokenizer_name="tiktoken/gpt2")
-    tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+    tokenizer = GPT2Tokenizer.from_pretrained('../checkpoints/gpt2')
     tokenizer.pad_token = tokenizer.eos_token
     list_data_dict = utils.jload(f"./alpaca_data.json")
     random.shuffle(list_data_dict)
